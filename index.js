@@ -222,8 +222,8 @@ app.post('/rdv', async (req, res) => {
     });
 
   } catch (err) {
-    console.error('Erreur:', err.message);
-    return res.status(500).json({ success: false, error: err.message });
+    console.error('Erreur complète:', err);
+    return res.status(500).json({ success: false, error: err.message, stack: err.stack });
   }
 });
 
