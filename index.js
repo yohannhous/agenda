@@ -148,7 +148,10 @@ async function getYeastarToken() {
     headers: { 'User-Agent': 'OpenAPI' }
   });
   yeastarToken       = res.data.access_token;
-  yeastarTokenExpiry = dayjs().add(res.data.expires_in - 60, 'second');
+  const expiresIn = res.data.expires_in || res.data.expiresIn || 1800;
+  yeastarTokenExpiry = dayjs().add(expiresIn - 60, 'second');
+  console.log('Token expire dans', expiresIn, 'secondes');
+  console.log('Reponse token complète:', JSON.stringify(res.data));
   console.log('Token Yeastar obtenu, expire dans', res.data.expires_in, 'secondes');
   return yeastarToken;
 }
