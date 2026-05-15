@@ -156,8 +156,10 @@ async function getTranscription(telephone) {
     // Nettoyer le numero de telephone
     const telPropre = telephone.replace(/^\+/, '').replace(/^262/, '0');
 
-    const startTime = dayjs().subtract(10, 'minute').format('YYYY/MM/DD HH:mm:ss');
-    const endTime   = dayjs().add(1, 'minute').format('YYYY/MM/DD HH:mm:ss');
+    const now = dayjs().add(4, 'hour');
+    const startTime = now.subtract(10, 'minute').format('YYYY/MM/DD HH:mm:ss');
+    const endTime   = now.add(2, 'minute').format('YYYY/MM/DD HH:mm:ss');
+    console.log('Heure Reunion:', now.format('YYYY/MM/DD HH:mm:ss'));
 
     const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/search`;
     console.log('URL CDR:', url);
