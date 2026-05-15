@@ -3,6 +3,8 @@ const express    = require('express');
 const dayjs      = require('dayjs');
 const axios      = require('axios');
 const { google } = require('googleapis');
+const fs         = require('fs');
+const path       = require('path');
 
 require('dayjs/locale/fr');
 dayjs.locale('fr');
@@ -141,81 +143,102 @@ async function getYeastarToken() {
   }, {
     headers: { 'User-Agent': 'OpenAPI', 'Content-Type': 'application/json' }
   });
-  console.log('Reponse token:', JSON.stringify(res.data).substring(0, 200));
   const token = res.data.access_token || res.data.token || res.data.data?.access_token;
   if (!token) throw new Error('Token introuvable: ' + JSON.stringify(res.data));
+  console.log('Token Yeastar obtenu');
   return token;
 }
 
-async function getTranscription(telephone) {
-  try {
-    await new Promise(r => setTimeout(r, 15000));
+async function getRecordingUrl(token, telephone) {
+  const now = dayjs().add(4, 'hour');
+  const startTime = now.subtract(15, 'minute').format('DD/MM/YYYY HH:mm:ss');
+  const endTime   = now.add(2, 'minute').format('DD/MM/YYYY HH:mm:ss');
 
-    const token = await getYeastarToken();
+  console.log('Recherche enregistrement pour:', telephone);
+  console.log('Periode:', startTime, '->', endTime);
 
-    const now = dayjs().add(4, 'hour');
-    const startTime = now.subtract(10, 'minute').format('DD/MM/YYYY HH:mm:ss');
-    const endTime   = now.add(2, 'minute').format('DD/MM/YYYY HH:mm:ss');
+  const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/recording/search`;
+  const res = await axios.get(url, {
+    headers: { 'User-Agent': 'OpenAPI' },
+    params: {
+      access_token: token,
+      caller:       telephone,
+      start_time:   startTime,
+      end_time:     endTime,
+      page:         1,
+      page_size:    5
+    }
+  });
 
-    console.log('Heure Reunion:', now.format('DD/MM/YYYY HH:mm:ss'));
-    console.log('Periode:', startTime, '->', endTime);
-    console.log('Telephone:', telephone);
+  console.log('Recordings:', JSON.stringify(res.data).substring(0, 500));
 
-    const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/search`;
-
-    const res = await axios.get(url, {
+  const recordings = res.data?.data || [];
+  if (!recordings.length) {
+    console.log('Aucun enregistrement trouve, essai sans filtre...');
+    const res2 = await axios.get(url, {
       headers: { 'User-Agent': 'OpenAPI' },
       params: {
         access_token: token,
-        call_from:    telephone,
         start_time:   startTime,
         end_time:     endTime,
         page:         1,
         page_size:    5
       }
     });
-
-    console.log('CDR Yeastar:', JSON.stringify(res.data).substring(0, 1000));
-
-    const cdrs = res.data?.data || [];
-    if (!cdrs.length) {
-      console.log('Aucun CDR trouve avec filtre telephone, essai sans filtre...');
-      const res2 = await axios.get(url, {
-        headers: { 'User-Agent': 'OpenAPI' },
-        params: {
-          access_token: token,
-          start_time:   startTime,
-          end_time:     endTime,
-          page:         1,
-          page_size:    5
-        }
-      });
-      console.log('CDR sans filtre:', JSON.stringify(res2.data).substring(0, 1000));
-      const cdrs2 = res2.data?.data || [];
-      if (!cdrs2.length) return null;
-      const cdr2 = cdrs2[0];
-      console.log('Champs CDR:', Object.keys(cdr2).join(', '));
-      return cdr2?.transcription || cdr2?.transcript || cdr2?.ai_transcript || cdr2?.call_transcription || null;
-    }
-
-    const cdr = cdrs[0];
-    console.log('Champs CDR:', Object.keys(cdr).join(', '));
-    const uid = cdr?.uid || cdr?.new_id;
-    console.log('UID CDR trouve:', uid);
-
-    // Recuperer la transcription avec l uid
-    const resT = await axios.get(`https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/get`, {
-      headers: { 'User-Agent': 'OpenAPI' },
-      params: { access_token: token, uid: uid }
-    });
-    console.log('Detail CDR:', JSON.stringify(resT.data).substring(0, 500));
-    return resT.data?.data?.transcription || resT.data?.data?.transcript || null;
-
-  } catch (err) {
-    console.error('Erreur transcription:', err.message);
-    if (err.response) console.error('Response:', JSON.stringify(err.response.data));
-    return null;
+    console.log('Recordings sans filtre:', JSON.stringify(res2.data).substring(0, 500));
+    const recs2 = res2.data?.data || [];
+    if (!recs2.length) return null;
+    return recs2[0];
   }
+
+  return recordings[0];
+}
+
+async function downloadRecording(token, recording) {
+  const fileName = recording?.file_name || recording?.filename || recording?.name;
+  console.log('Champs recording:', Object.keys(recording).join(', '));
+  console.log('Fichier:', fileName);
+
+  if (!fileName) return null;
+
+  const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/recording/download`;
+  const res = await axios.get(url, {
+    headers: { 'User-Agent': 'OpenAPI' },
+    params: { access_token: token, file_name: fileName }
+  });
+
+  console.log('Download response:', JSON.stringify(res.data).substring(0, 300));
+  return res.data?.data?.download_url || res.data?.download_url || null;
+}
+
+async function transcribeWithWhisper(audioUrl) {
+  console.log('Transcription Whisper de:', audioUrl);
+
+  // Telecharger le fichier audio
+  const audioRes = await axios.get(audioUrl, { responseType: 'arraybuffer' });
+  const audioBuffer = Buffer.from(audioRes.data);
+  const tmpPath = `/tmp/recording_${Date.now()}.wav`;
+  fs.writeFileSync(tmpPath, audioBuffer);
+
+  // Envoyer a OpenAI Whisper
+  const FormData = require('form-data');
+  const form = new FormData();
+  form.append('file', fs.createReadStream(tmpPath), { filename: 'audio.wav', contentType: 'audio/wav' });
+  form.append('model', 'whisper-1');
+  form.append('language', 'fr');
+
+  const res = await axios.post('https://api.openai.com/v1/audio/transcriptions', form, {
+    headers: {
+      ...form.getHeaders(),
+      'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity
+  });
+
+  fs.unlinkSync(tmpPath);
+  console.log('Transcription Whisper:', res.data?.text?.substring(0, 200));
+  return res.data?.text || null;
 }
 
 async function extraireInfosClient(transcription, telephone) {
@@ -263,15 +286,33 @@ Si une info est absente mets null.`
 async function traiterAppel(telephone) {
   console.log(`Traitement appel depuis ${telephone}...`);
 
-  const transcription = await getTranscription(telephone);
+  // Attendre que l enregistrement soit disponible
+  await new Promise(r => setTimeout(r, 20000));
 
-  if (!transcription || transcription.length < 20) {
-    console.log('Transcription vide ou absente');
+  const token = await getYeastarToken();
+
+  // Recuperer l enregistrement
+  const recording = await getRecordingUrl(token, telephone);
+  if (!recording) {
+    console.log('Aucun enregistrement trouve');
     return;
   }
 
-  console.log('Transcription:', transcription.substring(0, 300));
+  // Obtenir l URL de telechargement
+  const downloadUrl = await downloadRecording(token, recording);
+  if (!downloadUrl) {
+    console.log('URL de telechargement introuvable');
+    return;
+  }
 
+  // Transcrire avec Whisper
+  const transcription = await transcribeWithWhisper(downloadUrl);
+  if (!transcription || transcription.length < 20) {
+    console.log('Transcription vide');
+    return;
+  }
+
+  // Extraire les infos
   const infos = await extraireInfosClient(transcription, telephone);
   console.log('Infos extraites:', infos);
 
@@ -280,6 +321,7 @@ async function traiterAppel(telephone) {
     return;
   }
 
+  // Trouver un creneau et creer le RDV
   const dispo = await trouverCreneau(infos.nbProduits || 1);
   if (!dispo) { console.log('Aucun creneau disponible'); return; }
 
