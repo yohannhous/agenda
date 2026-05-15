@@ -161,7 +161,7 @@ async function getTranscription(callId) {
     await new Promise(r => setTimeout(r, 10000));
 
     const token = await getYeastarToken();
-    const url   = `https://${process.env.YEASTAR_URL}/openapi/v1.0/call/cdr`;
+    const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/recording/list`;
 
     const res = await axios.get(url, {
       headers: { Authorization: `Bearer ${token}` },
