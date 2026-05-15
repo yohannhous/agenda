@@ -28,6 +28,7 @@ const HORAIRES = [
   { debut: 14, fin: 18 }
 ];
 
+// ─── Auth Google ──────────────────────────────────────────────
 function getAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   return new google.auth.GoogleAuth({
@@ -36,6 +37,7 @@ function getAuth() {
   });
 }
 
+// ─── Créneaux ────────────────────────────────────────────────
 function genCreneaux(date, dureeMin) {
   const slots = [];
   const d = dayjs(date);
@@ -133,6 +135,52 @@ async function verifierAdresse(adresse, codePostal, ville) {
   }
 }
 
+// ─── Token Yeastar ────────────────────────────────────────────
+let yeastarToken = null;
+let yeastarTokenExpiry = null;
+
+async function getYeastarToken() {
+  if (yeastarToken && yeastarTokenExpiry && dayjs().isBefore(yeastarTokenExpiry)) {
+    return yeastarToken;
+  }
+  const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/get_token`;
+  const res = await axios.post(url, {
+    client_id:     process.env.YEASTAR_CLIENT_ID,
+    client_secret: process.env.YEASTAR_CLIENT_SECRET
+  });
+  yeastarToken       = res.data.access_token;
+  yeastarTokenExpiry = dayjs().add(res.data.expires_in - 60, 'second');
+  console.log('Token Yeastar obtenu');
+  return yeastarToken;
+}
+
+// ─── Récupérer la transcription depuis Yeastar ────────────────
+async function getTranscription(callId) {
+  try {
+    // Attendre 10 secondes que la transcription soit prête
+    await new Promise(r => setTimeout(r, 10000));
+
+    const token = await getYeastarToken();
+    const url   = `https://${process.env.YEASTAR_URL}/openapi/v1.0/call/cdr`;
+
+    const res = await axios.get(url, {
+      headers: { Authorization: `Bearer ${token}` },
+      params:  { call_id: callId }
+    });
+
+    console.log('CDR Yeastar:', JSON.stringify(res.data).substring(0, 500));
+
+    // Chercher la transcription dans la réponse
+    const cdr = res.data?.data?.[0] || res.data;
+    return cdr?.transcription || cdr?.transcript || cdr?.ai_transcript || null;
+
+  } catch (err) {
+    console.error('Erreur récupération transcription:', err.message);
+    return null;
+  }
+}
+
+// ─── Extraire les infos via OpenAI ───────────────────────────
 async function extraireInfosClient(transcription, telephone) {
   const response = await axios.post(
     'https://api.openai.com/v1/chat/completions',
@@ -175,69 +223,88 @@ Si une info est absente mets null.`
   return JSON.parse(content);
 }
 
+// ─── Traiter un appel (appelé en async après webhook) ─────────
+async function traiterAppel(callId, telephone) {
+  console.log(`Traitement appel ${callId}...`);
+
+  // Récupérer la transcription
+  const transcription = await getTranscription(callId);
+
+  if (!transcription || transcription.length < 20) {
+    console.log('Transcription vide ou absente pour', callId);
+    return;
+  }
+
+  console.log('Transcription recuperee:', transcription.substring(0, 200));
+
+  // Extraire les infos
+  const infos = await extraireInfosClient(transcription, telephone);
+  console.log('Infos extraites:', infos);
+
+  if (!infos.rdvSouhaite || !infos.prenom || !infos.adresse || !infos.ville) {
+    console.log('Pas de RDV a creer pour cet appel');
+    return;
+  }
+
+  // Trouver un creneau
+  const dispo = await trouverCreneau(infos.nbProduits || 1);
+  if (!dispo) { console.log('Aucun creneau disponible'); return; }
+
+  // Creer le RDV
+  const rdv = await creerRDV({
+    slot:  dispo.slot,
+    duree: dispo.duree,
+    client: {
+      prenom:     infos.prenom    || 'Inconnu',
+      nom:        infos.nom       || '',
+      telephone:  infos.telephone || telephone,
+      adresse:    infos.adresse,
+      codePostal: infos.codePostal || '',
+      ville:      infos.ville,
+      demande:    infos.demande   || '',
+      notes:      infos.notes     || ''
+    }
+  });
+
+  console.log(`RDV cree avec succes : ${rdv.debut} — ${rdv.lien}`);
+}
+
+// ─── Routes ───────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'SECUTECH Booking API' });
 });
 
+// Webhook Yeastar 30012 — fin d'appel
 app.post('/webhook', async (req, res) => {
-  console.log('Webhook Yeastar recu:', JSON.stringify(req.body));
+  console.log('Webhook recu:', JSON.stringify(req.body).substring(0, 300));
+
+  // Repondre immediatement a Yeastar
+  res.json({ success: true, message: 'Webhook recu' });
+
+  // Extraire le call_id et le telephone
   try {
-    const transcription =
-      req.body.transcription ||
-      req.body.transcript    ||
-      req.body.content       ||
-      req.body.text          ||
-      req.body.call_transcription || '';
-    const telephone =
-      req.body.caller    ||
-      req.body.from      ||
-      req.body.callerNum ||
-      req.body.caller_num || '';
+    const msg       = req.body?.msg ? JSON.parse(req.body.msg) : req.body;
+    const callId    = msg?.call_id  || msg?.uid || req.body?.call_id || '';
+    const telephone = msg?.call_from || msg?.caller || req.body?.caller || '';
 
-    console.log('Transcription:', transcription.substring(0, 300));
+    console.log(`Call ID: ${callId}, Telephone: ${telephone}`);
 
-    if (!transcription || transcription.length < 20) {
-      return res.json({ success: false, message: 'Transcription absente ou trop courte' });
+    if (!callId) {
+      console.log('Pas de call_id trouve dans le webhook');
+      return;
     }
 
-    const infos = await extraireInfosClient(transcription, telephone);
-    console.log('Infos extraites:', infos);
-
-    if (!infos.rdvSouhaite) {
-      return res.json({ success: false, message: 'Pas de RDV souhaite dans cet appel' });
-    }
-
-    if (!infos.prenom || !infos.adresse || !infos.ville) {
-      return res.json({ success: false, message: 'Informations insuffisantes', infos });
-    }
-
-    const adresseCheck = await verifierAdresse(infos.adresse, infos.codePostal || '', infos.ville);
-    const dispo = await trouverCreneau(infos.nbProduits || 1);
-    if (!dispo) return res.json({ success: false, message: 'Aucun creneau disponible' });
-
-    const rdv = await creerRDV({
-      slot:  dispo.slot,
-      duree: dispo.duree,
-      client: {
-        prenom:     infos.prenom    || 'Inconnu',
-        nom:        infos.nom       || '',
-        telephone:  infos.telephone || telephone,
-        adresse:    infos.adresse,
-        codePostal: infos.codePostal || '',
-        ville:      infos.ville,
-        demande:    infos.demande   || '',
-        notes:      infos.notes     || ''
-      }
+    // Traiter l'appel en arriere-plan
+    traiterAppel(callId, telephone).catch(err => {
+      console.error('Erreur traitement appel:', err.message);
     });
 
-    return res.json({ success: true, rdv: { technicien: TECH.name, debut: rdv.debut, lien: rdv.lien } });
-
   } catch (err) {
-    console.error('Erreur webhook:', err.message);
-    return res.status(500).json({ success: false, error: err.message });
+    console.error('Erreur parsing webhook:', err.message);
   }
 });
 
+// Route manuelle pour tests
 app.post('/rdv', async (req, res) => {
   const { prenom, nom, telephone, adresse, codePostal, ville, demande, nbProduits, notes, datePreferee } = req.body;
   const manquants = [];
@@ -258,8 +325,8 @@ app.post('/rdv', async (req, res) => {
     const rdv = await creerRDV({ slot: dispo.slot, duree: dispo.duree, client: { prenom, nom, telephone, adresse, codePostal, ville, demande, notes: notes || '' } });
     return res.json({
       success: true,
-      rdv: { technicien: TECH.name, debut: rdv.debut, fin: rdv.fin, duree: `${dispo.duree} minutes`, adresse: adresseCheck.valide ? adresseCheck.adresseFormatee : `${adresse}, ${codePostal} ${ville}`, lien: rdv.lien },
-      messageClient: `Parfait ${prenom} ! Votre rendez-vous est confirme le ${rdv.debut}. Notre technicien ${TECH.name} sera chez vous. La visite durera environ ${dispo.duree} minutes. A tres bientot !`
+      rdv: { technicien: TECH.name, debut: rdv.debut, fin: rdv.fin, duree: `${dispo.duree} minutes`, lien: rdv.lien },
+      messageClient: `Parfait ${prenom} ! Votre rendez-vous est confirme le ${rdv.debut}. La visite durera environ ${dispo.duree} minutes.`
     });
   } catch (err) {
     console.error('Erreur:', err.message);
