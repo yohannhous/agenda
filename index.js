@@ -136,8 +136,8 @@ async function verifierAdresse(adresse, codePostal, ville) {
 async function getYeastarToken() {
   const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/get_token`;
   const res = await axios.post(url, {
-    client_id:     process.env.YEASTAR_CLIENT_ID,
-    client_secret: process.env.YEASTAR_CLIENT_SECRET
+    username: process.env.YEASTAR_CLIENT_ID,
+    password: process.env.YEASTAR_CLIENT_SECRET
   }, {
     headers: { 'User-Agent': 'OpenAPI', 'Content-Type': 'application/json' }
   });
