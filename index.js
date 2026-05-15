@@ -161,11 +161,11 @@ async function getTranscription(callId) {
     await new Promise(r => setTimeout(r, 10000));
 
     const token = await getYeastarToken();
-    const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/recording/list`;
+    const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/recording/search`;
 
-    const res = await axios.get(url, {
+    const res = await axios.post(url, {
       headers: { Authorization: `Bearer ${token}` },
-      params:  { call_id: callId }
+      data: { call_id: callId, page: 1, page_size: 5 }
     });
 
     console.log('CDR Yeastar:', JSON.stringify(res.data).substring(0, 500));
