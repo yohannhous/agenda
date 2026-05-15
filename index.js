@@ -141,9 +141,9 @@ async function getYeastarToken() {
   }, {
     headers: { 'User-Agent': 'OpenAPI', 'Content-Type': 'application/json' }
   });
-  console.log('Reponse token complète:', JSON.stringify(res.data));
+  console.log('Reponse token:', JSON.stringify(res.data).substring(0, 200));
   const token = res.data.access_token || res.data.token || res.data.data?.access_token;
-  if (!token) throw new Error('Token introuvable dans la reponse: ' + JSON.stringify(res.data));
+  if (!token) throw new Error('Token introuvable: ' + JSON.stringify(res.data));
   return token;
 }
 
@@ -153,24 +153,21 @@ async function getTranscription(telephone) {
 
     const token = await getYeastarToken();
 
-    // Nettoyer le numero de telephone
-    const telPropre = telephone.replace(/^\+/, '').replace(/^262/, '0');
-
     const now = dayjs().add(4, 'hour');
-    const startTime = now.subtract(10, 'minute').format('YYYY/MM/DD HH:mm:ss');
-    const endTime   = now.add(2, 'minute').format('YYYY/MM/DD HH:mm:ss');
-    console.log('Heure Reunion:', now.format('YYYY/MM/DD HH:mm:ss'));
+    const startTime = now.subtract(10, 'minute').format('DD/MM/YYYY HH:mm:ss');
+    const endTime   = now.add(2, 'minute').format('DD/MM/YYYY HH:mm:ss');
+
+    console.log('Heure Reunion:', now.format('DD/MM/YYYY HH:mm:ss'));
+    console.log('Periode:', startTime, '->', endTime);
+    console.log('Telephone:', telephone);
 
     const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/search`;
-    console.log('URL CDR:', url);
-    console.log('Telephone propre:', telPropre);
-    console.log('Periode:', startTime, '->', endTime);
 
     const res = await axios.get(url, {
       headers: { 'User-Agent': 'OpenAPI' },
       params: {
         access_token: token,
-        call_from:    telPropre,
+        call_from:    telephone,
         start_time:   startTime,
         end_time:     endTime,
         page:         1,
@@ -178,13 +175,11 @@ async function getTranscription(telephone) {
       }
     });
 
-    console.log('CDR Yeastar complet:', JSON.stringify(res.data).substring(0, 1000));
+    console.log('CDR Yeastar:', JSON.stringify(res.data).substring(0, 1000));
 
     const cdrs = res.data?.data || [];
     if (!cdrs.length) {
-      console.log('Aucun CDR trouve, essai sans filtre telephone...');
-
-      // Essai sans filtre telephone
+      console.log('Aucun CDR trouve avec filtre telephone, essai sans filtre...');
       const res2 = await axios.get(url, {
         headers: { 'User-Agent': 'OpenAPI' },
         params: {
@@ -199,15 +194,16 @@ async function getTranscription(telephone) {
       const cdrs2 = res2.data?.data || [];
       if (!cdrs2.length) return null;
       const cdr2 = cdrs2[0];
+      console.log('Champs CDR:', Object.keys(cdr2).join(', '));
       return cdr2?.transcription || cdr2?.transcript || cdr2?.ai_transcript || cdr2?.call_transcription || null;
     }
 
     const cdr = cdrs[0];
-    console.log('CDR trouve, champs disponibles:', Object.keys(cdr).join(', '));
+    console.log('Champs CDR:', Object.keys(cdr).join(', '));
     return cdr?.transcription || cdr?.transcript || cdr?.ai_transcript || cdr?.call_transcription || null;
 
   } catch (err) {
-    console.error('Erreur recuperation transcription:', err.message);
+    console.error('Erreur transcription:', err.message);
     if (err.response) console.error('Response:', JSON.stringify(err.response.data));
     return null;
   }
@@ -265,7 +261,7 @@ async function traiterAppel(telephone) {
     return;
   }
 
-  console.log('Transcription recuperee:', transcription.substring(0, 200));
+  console.log('Transcription:', transcription.substring(0, 300));
 
   const infos = await extraireInfosClient(transcription, telephone);
   console.log('Infos extraites:', infos);
@@ -302,24 +298,14 @@ app.get('/', (req, res) => {
 
 app.post('/webhook', async (req, res) => {
   console.log('Webhook recu:', JSON.stringify(req.body).substring(0, 300));
-
   res.json({ success: true, message: 'Webhook recu' });
 
   try {
     const msg       = req.body?.msg ? JSON.parse(req.body.msg) : req.body;
     const telephone = msg?.call_from || msg?.caller || req.body?.caller || '';
-
     console.log(`Telephone: ${telephone}`);
-
-    if (!telephone) {
-      console.log('Pas de telephone trouve');
-      return;
-    }
-
-    traiterAppel(telephone).catch(err => {
-      console.error('Erreur traitement appel:', err.message);
-    });
-
+    if (!telephone) { console.log('Pas de telephone'); return; }
+    traiterAppel(telephone).catch(err => console.error('Erreur:', err.message));
   } catch (err) {
     console.error('Erreur parsing webhook:', err.message);
   }
