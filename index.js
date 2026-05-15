@@ -133,27 +133,18 @@ async function verifierAdresse(adresse, codePostal, ville) {
   }
 }
 
-let yeastarToken = null;
-let yeastarTokenExpiry = null;
-
 async function getYeastarToken() {
-  if (yeastarToken && yeastarTokenExpiry && dayjs().isBefore(yeastarTokenExpiry)) {
-    return yeastarToken;
-  }
   const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/get_token`;
   const res = await axios.post(url, {
     client_id:     process.env.YEASTAR_CLIENT_ID,
     client_secret: process.env.YEASTAR_CLIENT_SECRET
   }, {
-    headers: { 'User-Agent': 'OpenAPI' }
+    headers: { 'User-Agent': 'OpenAPI', 'Content-Type': 'application/json' }
   });
-  yeastarToken       = res.data.access_token;
-  const expiresIn = res.data.expires_in || res.data.expiresIn || 1800;
-  yeastarTokenExpiry = dayjs().add(expiresIn - 60, 'second');
-  console.log('Token expire dans', expiresIn, 'secondes');
   console.log('Reponse token complète:', JSON.stringify(res.data));
-  console.log('Token Yeastar obtenu, expire dans', res.data.expires_in, 'secondes');
-  return yeastarToken;
+  const token = res.data.access_token || res.data.token || res.data.data?.access_token;
+  if (!token) throw new Error('Token introuvable dans la reponse: ' + JSON.stringify(res.data));
+  return token;
 }
 
 async function getTranscription(telephone) {
@@ -162,30 +153,60 @@ async function getTranscription(telephone) {
 
     const token = await getYeastarToken();
 
+    // Nettoyer le numero de telephone
+    const telPropre = telephone.replace(/^\+/, '').replace(/^262/, '0');
+
     const startTime = dayjs().subtract(10, 'minute').format('YYYY/MM/DD HH:mm:ss');
-    const endTime   = dayjs().format('YYYY/MM/DD HH:mm:ss');
+    const endTime   = dayjs().add(1, 'minute').format('YYYY/MM/DD HH:mm:ss');
 
     const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/search`;
+    console.log('URL CDR:', url);
+    console.log('Telephone propre:', telPropre);
+    console.log('Periode:', startTime, '->', endTime);
+
     const res = await axios.get(url, {
       headers: { 'User-Agent': 'OpenAPI' },
       params: {
         access_token: token,
-        call_from:    telephone,
+        call_from:    telPropre,
         start_time:   startTime,
-        end_time:     endTime
+        end_time:     endTime,
+        page:         1,
+        page_size:    5
       }
     });
 
-    console.log('CDR Yeastar:', JSON.stringify(res.data).substring(0, 500));
+    console.log('CDR Yeastar complet:', JSON.stringify(res.data).substring(0, 1000));
 
     const cdrs = res.data?.data || [];
-    if (!cdrs.length) return null;
+    if (!cdrs.length) {
+      console.log('Aucun CDR trouve, essai sans filtre telephone...');
+
+      // Essai sans filtre telephone
+      const res2 = await axios.get(url, {
+        headers: { 'User-Agent': 'OpenAPI' },
+        params: {
+          access_token: token,
+          start_time:   startTime,
+          end_time:     endTime,
+          page:         1,
+          page_size:    5
+        }
+      });
+      console.log('CDR sans filtre:', JSON.stringify(res2.data).substring(0, 1000));
+      const cdrs2 = res2.data?.data || [];
+      if (!cdrs2.length) return null;
+      const cdr2 = cdrs2[0];
+      return cdr2?.transcription || cdr2?.transcript || cdr2?.ai_transcript || cdr2?.call_transcription || null;
+    }
 
     const cdr = cdrs[0];
+    console.log('CDR trouve, champs disponibles:', Object.keys(cdr).join(', '));
     return cdr?.transcription || cdr?.transcript || cdr?.ai_transcript || cdr?.call_transcription || null;
 
   } catch (err) {
     console.error('Erreur recuperation transcription:', err.message);
+    if (err.response) console.error('Response:', JSON.stringify(err.response.data));
     return null;
   }
 }
