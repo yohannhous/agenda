@@ -1,0 +1,16 @@
+{
+  "name": "secutech-booking",
+  "version": "1.0.0",
+  "description": "Prise de RDV automatique SECUTECH",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "googleapis": "^128.0.0",
+    "axios": "^1.6.0",
+    "dayjs": "^1.11.10",
+    "dotenv": "^16.3.1"
+  }
+}
