@@ -28,7 +28,6 @@ const HORAIRES = [
   { debut: 14, fin: 18 }
 ];
 
-// ─── Auth Google ──────────────────────────────────────────────
 function getAuth() {
   const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
   return new google.auth.GoogleAuth({
@@ -37,7 +36,6 @@ function getAuth() {
   });
 }
 
-// ─── Créneaux ────────────────────────────────────────────────
 function genCreneaux(date, dureeMin) {
   const slots = [];
   const d = dayjs(date);
@@ -135,7 +133,6 @@ async function verifierAdresse(adresse, codePostal, ville) {
   }
 }
 
-// ─── Token Yeastar ────────────────────────────────────────────
 let yeastarToken = null;
 let yeastarTokenExpiry = null;
 
@@ -147,40 +144,49 @@ async function getYeastarToken() {
   const res = await axios.post(url, {
     client_id:     process.env.YEASTAR_CLIENT_ID,
     client_secret: process.env.YEASTAR_CLIENT_SECRET
+  }, {
+    headers: { 'User-Agent': 'OpenAPI' }
   });
   yeastarToken       = res.data.access_token;
   yeastarTokenExpiry = dayjs().add(res.data.expires_in - 60, 'second');
-  console.log('Token Yeastar obtenu');
+  console.log('Token Yeastar obtenu, expire dans', res.data.expires_in, 'secondes');
   return yeastarToken;
 }
 
-// ─── Récupérer la transcription depuis Yeastar ────────────────
-async function getTranscription(callId) {
+async function getTranscription(telephone) {
   try {
-    // Attendre 10 secondes que la transcription soit prête
-    await new Promise(r => setTimeout(r, 10000));
+    await new Promise(r => setTimeout(r, 15000));
 
     const token = await getYeastarToken();
-    const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/recording/search`;
 
-    const res = await axios.post(url, {
-      headers: { Authorization: `Bearer ${token}` },
-      data: { call_id: callId, page: 1, page_size: 5 }
+    const startTime = dayjs().subtract(10, 'minute').format('YYYY/MM/DD HH:mm:ss');
+    const endTime   = dayjs().format('YYYY/MM/DD HH:mm:ss');
+
+    const url = `https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/search`;
+    const res = await axios.get(url, {
+      headers: { 'User-Agent': 'OpenAPI' },
+      params: {
+        access_token: token,
+        call_from:    telephone,
+        start_time:   startTime,
+        end_time:     endTime
+      }
     });
 
     console.log('CDR Yeastar:', JSON.stringify(res.data).substring(0, 500));
 
-    // Chercher la transcription dans la réponse
-    const cdr = res.data?.data?.[0] || res.data;
-    return cdr?.transcription || cdr?.transcript || cdr?.ai_transcript || null;
+    const cdrs = res.data?.data || [];
+    if (!cdrs.length) return null;
+
+    const cdr = cdrs[0];
+    return cdr?.transcription || cdr?.transcript || cdr?.ai_transcript || cdr?.call_transcription || null;
 
   } catch (err) {
-    console.error('Erreur récupération transcription:', err.message);
+    console.error('Erreur recuperation transcription:', err.message);
     return null;
   }
 }
 
-// ─── Extraire les infos via OpenAI ───────────────────────────
 async function extraireInfosClient(transcription, telephone) {
   const response = await axios.post(
     'https://api.openai.com/v1/chat/completions',
@@ -223,34 +229,29 @@ Si une info est absente mets null.`
   return JSON.parse(content);
 }
 
-// ─── Traiter un appel (appelé en async après webhook) ─────────
-async function traiterAppel(callId, telephone) {
-  console.log(`Traitement appel ${callId}...`);
+async function traiterAppel(telephone) {
+  console.log(`Traitement appel depuis ${telephone}...`);
 
-  // Récupérer la transcription
-  const transcription = await getTranscription(callId);
+  const transcription = await getTranscription(telephone);
 
   if (!transcription || transcription.length < 20) {
-    console.log('Transcription vide ou absente pour', callId);
+    console.log('Transcription vide ou absente');
     return;
   }
 
   console.log('Transcription recuperee:', transcription.substring(0, 200));
 
-  // Extraire les infos
   const infos = await extraireInfosClient(transcription, telephone);
   console.log('Infos extraites:', infos);
 
   if (!infos.rdvSouhaite || !infos.prenom || !infos.adresse || !infos.ville) {
-    console.log('Pas de RDV a creer pour cet appel');
+    console.log('Pas de RDV a creer');
     return;
   }
 
-  // Trouver un creneau
   const dispo = await trouverCreneau(infos.nbProduits || 1);
   if (!dispo) { console.log('Aucun creneau disponible'); return; }
 
-  // Creer le RDV
   const rdv = await creerRDV({
     slot:  dispo.slot,
     duree: dispo.duree,
@@ -266,36 +267,30 @@ async function traiterAppel(callId, telephone) {
     }
   });
 
-  console.log(`RDV cree avec succes : ${rdv.debut} — ${rdv.lien}`);
+  console.log(`RDV cree : ${rdv.debut} — ${rdv.lien}`);
 }
 
-// ─── Routes ───────────────────────────────────────────────────
 app.get('/', (req, res) => {
   res.json({ status: 'ok', service: 'SECUTECH Booking API' });
 });
 
-// Webhook Yeastar 30012 — fin d'appel
 app.post('/webhook', async (req, res) => {
   console.log('Webhook recu:', JSON.stringify(req.body).substring(0, 300));
 
-  // Repondre immediatement a Yeastar
   res.json({ success: true, message: 'Webhook recu' });
 
-  // Extraire le call_id et le telephone
   try {
     const msg       = req.body?.msg ? JSON.parse(req.body.msg) : req.body;
-    const callId    = msg?.call_id  || msg?.uid || req.body?.call_id || '';
     const telephone = msg?.call_from || msg?.caller || req.body?.caller || '';
 
-    console.log(`Call ID: ${callId}, Telephone: ${telephone}`);
+    console.log(`Telephone: ${telephone}`);
 
-    if (!callId) {
-      console.log('Pas de call_id trouve dans le webhook');
+    if (!telephone) {
+      console.log('Pas de telephone trouve');
       return;
     }
 
-    // Traiter l'appel en arriere-plan
-    traiterAppel(callId, telephone).catch(err => {
+    traiterAppel(telephone).catch(err => {
       console.error('Erreur traitement appel:', err.message);
     });
 
@@ -304,7 +299,6 @@ app.post('/webhook', async (req, res) => {
   }
 });
 
-// Route manuelle pour tests
 app.post('/rdv', async (req, res) => {
   const { prenom, nom, telephone, adresse, codePostal, ville, demande, nbProduits, notes, datePreferee } = req.body;
   const manquants = [];
