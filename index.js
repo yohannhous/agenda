@@ -200,7 +200,16 @@ async function getTranscription(telephone) {
 
     const cdr = cdrs[0];
     console.log('Champs CDR:', Object.keys(cdr).join(', '));
-    return cdr?.transcription || cdr?.transcript || cdr?.ai_transcript || cdr?.call_transcription || null;
+    const uid = cdr?.uid || cdr?.new_id;
+    console.log('UID CDR trouve:', uid);
+
+    // Recuperer la transcription avec l uid
+    const resT = await axios.get(`https://${process.env.YEASTAR_URL}/openapi/v1.0/cdr/get`, {
+      headers: { 'User-Agent': 'OpenAPI' },
+      params: { access_token: token, uid: uid }
+    });
+    console.log('Detail CDR:', JSON.stringify(resT.data).substring(0, 500));
+    return resT.data?.data?.transcription || resT.data?.data?.transcript || null;
 
   } catch (err) {
     console.error('Erreur transcription:', err.message);
